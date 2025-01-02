@@ -1,280 +1,297 @@
-from PIL import Image, ImageDraw, ImageFont
-import numpy as np
-import subprocess
-import tempfile
-import shutil
+from PIL import Image
+import sqlite3
+import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple, List, Union
+from typing import Dict, Any, Optional, List, Union
 from io import BytesIO
 import os
 
-from .image_processor import BaseImageProcessor
-from .effect_processor import EffectProcessor
-from .utils import ImageUtils
+from core.image_processor import BaseImageProcessor
+from core.effect_processor import EffectProcessor
+from core.utils import ImageUtils
 
-class AnimationProcessor:
+class ImageRepository:
     """
-    Handles creation and management of image effect animations.
+    Manages storage and retrieval of processed images with metadata.
     """
     
-    def __init__(self, image_input: Union[str, bytes, Image.Image, BytesIO]):
+    def __init__(self, db_path: Union[str, Path], storage_path: Union[str, Path]):
         """
-        Initialize animation processor.
+        Initialize image repository.
         
         Args:
-            image_input: Source image in various formats
+            db_path: Path to SQLite database file
+            storage_path: Path to image storage directory
         """
-        logging.basicConfig(level=logging.INFO)
-        self.logger = logging.getLogger('AnimationProcessor')
+        self.logger = logging.getLogger('ImageRepository')
+        self.db_path = Path(db_path)
+        self.storage_path = Path(storage_path)
         
-        # Load and validate input image
-        self.base_image = ImageUtils.load_image(image_input)
+        # Create storage directory if it doesn't exist
+        self.storage_path.mkdir(parents=True, exist_ok=True)
         
-        # Ensure dimensions are even for video encoding
-        width, height = self.base_image.size
-        new_width, new_height = ImageUtils.ensure_size_even(width, height)
-        
-        if (new_width, new_height) != (width, height):
-            new_image = Image.new('RGBA', (new_width, new_height), (0, 0, 0, 0))
-            new_image.paste(self.base_image, ((new_width - width) // 2, 
-                                            (new_height - height) // 2))
-            self.base_image = new_image
-        
-        # Set up temporary directory for frames
-        self.temp_dir = Path(tempfile.mkdtemp(prefix='anim_frames_'))
-        self.frames_dir = self.temp_dir / "frames"
-        self.frames_dir.mkdir(exist_ok=True)
-        
-        # Initialize processors
-        self.effect_processor = EffectProcessor(self.base_image)
-        
-    def generate_frames(self, 
-                       effects: List[Tuple[str, Dict[str, Any]]], 
-                       num_frames: int = 30) -> List[Path]:
-        """
-        Generate animation frames with multiple effects.
-        
-        Args:
-            effects: List of (effect_name, parameters) tuples
-            num_frames: Number of frames to generate
-            
-        Returns:
-            List of paths to generated frame files
-        """
-        frame_paths = []
-        
+        # Initialize database
+        self._init_db()
+
+    def _init_db(self) -> None:
+        """Initialize SQLite database with required tables."""
         try:
-            for i in range(num_frames):
-                # Calculate animation progress
-                progress = i / (num_frames - 1)
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
                 
-                # Process frame with interpolated parameters
-                frame = self.base_image.copy()
-                processor = EffectProcessor(frame)
+                # Create images table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS images (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        title TEXT NOT NULL,
+                        creator_id TEXT NOT NULL,
+                        creator_name TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        file_path TEXT NOT NULL,
+                        tags TEXT,
+                        parameters TEXT
+                    )
+                """)
                 
-                for effect_name, params in effects:
-                    # Interpolate parameters
-                    frame_params = {}
-                    for param_name, param_value in params.items():
-                        if isinstance(param_value, tuple) and len(param_value) == 2:
-                            frame_params[param_name] = ImageUtils.interpolate_value(
-                                param_value[0], param_value[1], progress
-                            )
-                        else:
-                            frame_params[param_name] = param_value
-                    
-                    # Apply effect
-                    processor.apply_effect(effect_name, frame_params)
+                # Create tags table for efficient tag lookup
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS tags (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        image_id INTEGER,
+                        tag TEXT NOT NULL,
+                        FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
+                    )
+                """)
                 
-                # Save frame
-                frame_path = self.frames_dir / f"frame_{i:04d}.png"
-                processor.save(frame_path)
-                frame_paths.append(frame_path)
+                conn.commit()
                 
-                self.logger.info(f"Generated frame {i + 1}/{num_frames}")
-                
-        except Exception as e:
-            self.logger.error(f"Frame generation error: {str(e)}")
+        except sqlite3.Error as e:
+            self.logger.error(f"Database initialization error: {e}")
             raise
-            
-        return frame_paths
 
-    def create_video(self, 
-                    frame_paths: List[Path],
-                    output_path: Optional[Union[str, Path]] = None,
-                    frame_rate: int = 24,
-                    crf: int = 23,
-                    preset: str = 'medium') -> Optional[Path]:
+    def store_image(self,
+                   image: Union[Image.Image, bytes, BytesIO],
+                   title: str,
+                   creator_id: str,
+                   creator_name: str,
+                   tags: Optional[List[str]] = None,
+                   parameters: Optional[Dict[str, Any]] = None) -> int:
         """
-        Create video from frames using ffmpeg.
+        Store image with metadata.
         
         Args:
-            frame_paths: List of frame file paths
-            output_path: Path for output video file
-            frame_rate: Frames per second
-            crf: Constant Rate Factor (18-28 recommended)
-            preset: ffmpeg encoding preset
+            image: Image to store
+            title: Image title
+            creator_id: Creator's unique identifier
+            creator_name: Creator's display name
+            tags: Optional list of tags
+            parameters: Optional effect parameters used
             
         Returns:
-            Path to output video file
+            ID of stored image record
         """
-        if not frame_paths:
-            raise ValueError("No frames provided for video creation")
-            
-        if not output_path:
-            output_path = self.temp_dir / "output.mp4"
-        else:
-            output_path = Path(output_path)
-            
         try:
-            # Ensure output directory exists
-            output_path.parent.mkdir(parents=True, exist_ok=True)
+            # Convert image to bytes if necessary
+            if isinstance(image, Image.Image):
+                img_bytes = BytesIO()
+                image.save(img_bytes, format='PNG')
+                img_bytes = img_bytes.getvalue()
+            elif isinstance(image, BytesIO):
+                img_bytes = image.getvalue()
+            else:
+                img_bytes = image
             
-            # Construct ffmpeg command
-            ffmpeg_cmd = [
-                'ffmpeg', '-y',
-                '-framerate', str(frame_rate),
-                '-i', str(self.frames_dir / 'frame_%04d.png'),
-                '-c:v', 'libx264',
-                '-pix_fmt', 'yuv420p',
-                '-crf', str(crf),
-                '-preset', preset,
-                '-movflags', '+faststart',
-                '-vf', 'format=yuv420p',
-                str(output_path)
-            ]
+            # Generate unique filename
+            filename = f"{title}_{creator_id}_{int(time.time())}.png"
+            file_path = self.storage_path / filename
             
-            # Run ffmpeg
-            result = subprocess.run(
-                ffmpeg_cmd,
-                check=True,
-                capture_output=True,
-                text=True
-            )
+            # Save image file
+            with open(file_path, 'wb') as f:
+                f.write(img_bytes)
             
-            if result.returncode == 0:
-                return output_path
+            # Store metadata in database
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
                 
-        except subprocess.CalledProcessError as e:
-            self.logger.error(f"ffmpeg error: {e.stderr}")
-        except Exception as e:
-            self.logger.error(f"Video creation error: {str(e)}")
+                # Insert image record
+                cursor.execute("""
+                    INSERT INTO images (title, creator_id, creator_name, file_path, tags, parameters)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    title,
+                    creator_id,
+                    creator_name,
+                    str(file_path),
+                    json.dumps(tags or []),
+                    json.dumps(parameters or {})
+                ))
+                
+                image_id = cursor.lastrowid
+                
+                # Store tags
+                if tags:
+                    cursor.executemany("""
+                        INSERT INTO tags (image_id, tag)
+                        VALUES (?, ?)
+                    """, [(image_id, tag) for tag in tags])
+                
+                conn.commit()
+                
+            return image_id
             
-        return None
+        except Exception as e:
+            self.logger.error(f"Error storing image: {e}")
+            raise
 
-    def create_gif(self, 
-                  frame_paths: List[Path],
-                  output_path: Optional[Union[str, Path]] = None,
-                  duration: int = 50) -> Optional[Path]:
+    def get_image(self, image_id: int) -> Optional[Dict[str, Any]]:
         """
-        Create animated GIF from frames.
+        Retrieve image and metadata by ID.
         
         Args:
-            frame_paths: List of frame file paths
-            output_path: Path for output GIF file
-            duration: Frame duration in milliseconds
+            image_id: Image record ID
             
         Returns:
-            Path to output GIF file
+            Dictionary containing image data and metadata
         """
-        if not frame_paths:
-            raise ValueError("No frames provided for GIF creation")
-            
-        if not output_path:
-            output_path = self.temp_dir / "output.gif"
-        else:
-            output_path = Path(output_path)
-            
         try:
-            # Load frames and optimize for GIF
-            frames = []
-            for frame_path in frame_paths:
-                with Image.open(frame_path) as frame:
-                    # Convert to P mode with adaptive palette
-                    if frame.mode != 'P':
-                        frame = frame.convert('RGBA').convert(
-                            'P', 
-                            palette=Image.Palette.ADAPTIVE, 
-                            colors=256
-                        )
-                    frames.append(frame.copy())
-            
-            # Save as GIF
-            frames[0].save(
-                output_path,
-                save_all=True,
-                append_images=frames[1:],
-                duration=duration,
-                loop=0,
-                optimize=True
-            )
-            
-            return output_path
-            
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    SELECT id, title, creator_id, creator_name, created_at, file_path, tags, parameters
+                    FROM images WHERE id = ?
+                """, (image_id,))
+                
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                    
+                # Load image file
+                file_path = Path(row[5])
+                if not file_path.exists():
+                    self.logger.error(f"Image file not found: {file_path}")
+                    return None
+                    
+                with open(file_path, 'rb') as f:
+                    image_data = f.read()
+                
+                return {
+                    'id': row[0],
+                    'title': row[1],
+                    'creator_id': row[2],
+                    'creator_name': row[3],
+                    'created_at': row[4],
+                    'image': image_data,
+                    'tags': json.loads(row[6]),
+                    'parameters': json.loads(row[7])
+                }
+                
         except Exception as e:
-            self.logger.error(f"GIF creation error: {str(e)}")
+            self.logger.error(f"Error retrieving image: {e}")
             return None
 
-    def create_ascii_animation(self,
-                             effects: List[Tuple[str, Dict[str, Any]]],
-                             num_frames: int = 30,
-                             cols: int = 120,
-                             scale: float = 0.43) -> List[str]:
+    def search_by_tags(self, tags: List[str]) -> List[Dict[str, Any]]:
         """
-        Create ASCII art animation frames.
+        Search for images by tags.
         
         Args:
-            effects: List of (effect_name, parameters) tuples
-            num_frames: Number of frames to generate
-            cols: Number of columns for ASCII art
-            scale: Character aspect ratio adjustment
+            tags: List of tags to search for
             
         Returns:
-            List of ASCII art strings
+            List of matching image records
         """
-        ascii_frames = []
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Build query to match any of the provided tags
+                placeholders = ','.join('?' * len(tags))
+                cursor.execute(f"""
+                    SELECT DISTINCT i.*
+                    FROM images i
+                    JOIN tags t ON i.id = t.image_id
+                    WHERE t.tag IN ({placeholders})
+                    ORDER BY i.created_at DESC
+                """, tags)
+                
+                results = []
+                for row in cursor.fetchall():
+                    results.append({
+                        'id': row[0],
+                        'title': row[1],
+                        'creator_id': row[2],
+                        'creator_name': row[3],
+                        'created_at': row[4],
+                        'tags': json.loads(row[6]),
+                        'parameters': json.loads(row[7])
+                    })
+                
+                return results
+                
+        except Exception as e:
+            self.logger.error(f"Error searching by tags: {e}")
+            return []
+
+    def delete_image(self, image_id: int) -> bool:
+        """
+        Delete image and associated metadata.
         
-        try:
-            for i in range(num_frames):
-                progress = i / (num_frames - 1)
-                
-                # Process frame with effects
-                frame = self.base_image.copy()
-                processor = EffectProcessor(frame)
-                
-                for effect_name, params in effects:
-                    frame_params = {}
-                    for param_name, param_value in params.items():
-                        if isinstance(param_value, tuple) and len(param_value) == 2:
-                            frame_params[param_name] = ImageUtils.interpolate_value(
-                                param_value[0], param_value[1], progress
-                            )
-                        else:
-                            frame_params[param_name] = param_value
-                    
-                    processor.apply_effect(effect_name, frame_params)
-                
-                # Convert to ASCII
-                ascii_frame = processor.convertImageToAscii(cols=cols, scale=scale)
-                ascii_frames.append('\n'.join(ascii_frame))
-                
-                self.logger.info(f"Generated ASCII frame {i + 1}/{num_frames}")
-                
-        except Exception as e:
-            self.logger.error(f"ASCII animation error: {str(e)}")
-            raise
+        Args:
+            image_id: ID of image to delete
             
-        return ascii_frames
-
-    def cleanup(self):
-        """Clean up temporary files."""
+        Returns:
+            True if successful, False otherwise
+        """
         try:
-            if self.temp_dir.exists():
-                shutil.rmtree(self.temp_dir)
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                
+                # Get file path before deleting record
+                cursor.execute("SELECT file_path FROM images WHERE id = ?", (image_id,))
+                row = cursor.fetchone()
+                if not row:
+                    return False
+                    
+                file_path = Path(row[0])
+                
+                # Delete database record (tags will be cascade deleted)
+                cursor.execute("DELETE FROM images WHERE id = ?", (image_id,))
+                conn.commit()
+                
+                # Delete image file
+                if file_path.exists():
+                    file_path.unlink()
+                
+                return True
+                
         except Exception as e:
-            self.logger.error(f"Cleanup error: {str(e)}")
+            self.logger.error(f"Error deleting image: {e}")
+            return False
 
-    def __del__(self):
-        """Ensure cleanup on object destruction."""
-        self.cleanup()
+    def cleanup_orphaned_files(self) -> int:
+        """
+        Remove image files without corresponding database records.
+        
+        Returns:
+            Number of files cleaned up
+        """
+        try:
+            # Get all file paths from database
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT file_path FROM images")
+                db_files = {Path(row[0]) for row in cursor.fetchall()}
+            
+            # Check actual files in storage directory
+            cleaned = 0
+            for file_path in self.storage_path.glob('*'):
+                if file_path.is_file() and file_path not in db_files:
+                    file_path.unlink()
+                    cleaned += 1
+            
+            return cleaned
+            
+        except Exception as e:
+            self.logger.error(f"Error cleaning up files: {e}")
+            return 0

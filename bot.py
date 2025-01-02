@@ -1,17 +1,20 @@
 import asyncio
 import os
 import sys
+import random
 from pathlib import Path
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-
-from image_processing.config.config import ConfigManager
-from image_processing.storage.repository import ImageRepository
-from image_processing.interface.command_parser import CommandParser
-from image_processing.core.effect_processor import EffectProcessor
-from image_processing.core.animation_processor import AnimationProcessor
-from image_processing.core.ascii_processor import ASCIIProcessor
+from PIL import Image
+from io import BytesIO
+from typing import Tuple, Optional  
+from config.config import ConfigManager
+from storage.repository import ImageRepository
+from interface.command_parser import CommandParser
+from core.effect_processor import EffectProcessor
+from core.animation_processor import AnimationProcessor
+from core.ascii_processor import ASCIIProcessor
 
 # Load environment variables
 load_dotenv()
@@ -28,6 +31,57 @@ intents.message_content = True
 intents.reactions = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
+async def get_input_image(ctx, repository, command) -> Tuple[Optional[bytes], str]:
+    """
+    Get input image from various sources.
+    
+    Priority:
+    1. Uploaded image
+    2. Random image if --random flag
+    3. Repository image if remix command
+    4. Default input.png
+    
+    Returns:
+        Tuple of (image_bytes, source_description)
+    """
+    # Check for uploaded image
+    if ctx.message.attachments:
+        return (await ctx.message.attachments[0].read(), "uploaded image")
+        
+    # Check for random flag
+    if hasattr(command, 'random') and command.random:
+        images_dir = Path("images")
+        if not images_dir.exists():
+            raise ValueError("Images directory not found")
+            
+        image_files = [f for f in images_dir.glob("*") 
+                      if f.suffix.lower() in {'.png', '.jpg', '.jpeg', '.gif'}]
+        if not image_files:
+            raise ValueError("No images found in images directory")
+            
+        random_image = random.choice(image_files)
+        with open(random_image, 'rb') as f:
+            return (f.read(), f"random image: {random_image.name}")
+            
+    # Check for remix command
+    if ctx.message.content.startswith('!remix'):
+        try:
+            image_id = int(ctx.message.content.split()[1])
+            image_data = repository.get_image(image_id)
+            if not image_data:
+                raise ValueError(f"Image with ID {image_id} not found")
+            return (image_data['image'], f"remixed image ID: {image_id}")
+        except (IndexError, ValueError) as e:
+            raise ValueError("Invalid remix command. Use: !remix <image_id>")
+            
+    # Default to input.png
+    input_path = Path("input.png")
+    if not input_path.exists():
+        raise ValueError("No image provided and input.png not found")
+        
+    with open(input_path, 'rb') as f:
+        return (f.read(), "input.png")
+
 @bot.event
 async def on_ready():
     """Bot startup event handler."""
@@ -39,26 +93,43 @@ async def on_reaction_add(reaction, user):
     if user != bot.user and str(reaction.emoji) == "🗑️":
         if reaction.message.author == bot.user:
             await reaction.message.delete()
-
-@bot.command(name='process')
-async def process_command(ctx, *args):
+@bot.command(name='ascii_animate')
+async def ascii_animate_command(ctx, *args):
+    try:
+        if not ctx.message.attachments:
+            await ctx.send("Please attach images for animation")
+            return
+            
+        processor = ASCIIProcessor()
+        frames = []
+        
+        # Convert each image to ASCII frame
+        for attachment in ctx.message.attachments:
+            image_bytes = await attachment.read()
+            img = Image.open(io.BytesIO(image_bytes))
+            ascii_lines = processor.convert_to_ascii(img)
+            frame = processor.create_frame_image(ascii_lines)
+            frames.append(frame)
+        
+        # Save as animation
+        frames[0].save("ascii_animation.gif", save_all=True, append_images=frames[1:], duration=100, loop=0)
+        await ctx.send(file=discord.File("ascii_animation.gif"))
+            
+    except Exception as e:
+        await ctx.send(f"Error creating ASCII animation: {str(e)}")
+@bot.command(name='image')
+async def image_command(ctx, *args):
     """Process an image with effects."""
     try:
         # Parse command
         command = command_parser.parse_command(' '.join(args))
         
         # Get input image
-        if ctx.message.attachments:
-            attachment = ctx.message.attachments[0]
-            image_bytes = await attachment.read()
-            source = "uploaded image"
-        else:
-            if not Path("input.png").exists():
-                await ctx.send("Please attach an image or ensure input.png exists!")
-                return
-            with open("input.png", "rb") as f:
-                image_bytes = f.read()
-            source = "input.png"
+        try:
+            image_bytes, source = await get_input_image(ctx, repository, command)
+        except ValueError as e:
+            await ctx.send(str(e))
+            return
 
         # Process image
         processor = EffectProcessor(image_bytes)
@@ -67,24 +138,78 @@ async def process_command(ctx, *args):
 
         # Save and send result
         output = processor.get_current_image()
+        output_bytes = BytesIO()
+        output.save(output_bytes, format='PNG')
+        output_bytes.seek(0)
         
         # Store in repository if configured
         if command.tags:
             image_id = repository.store_image(
-                image=output,
+                image=output_bytes.getvalue(),
                 title=f"Processed_{ctx.author.name}",
                 creator_id=str(ctx.author.id),
                 creator_name=ctx.author.name,
                 tags=command.tags,
-                parameters=dict(command.effects)
+                parameters=dict(command.effects),
+                source_image=source
             )
             await ctx.send(f"Image stored with ID: {image_id}")
 
         # Send processed image
-        await ctx.send(file=discord.File(output, filename="processed.png"))
+        output_bytes.seek(0)
+        await ctx.send(file=discord.File(output_bytes, filename="processed.png"))
 
     except Exception as e:
         await ctx.send(f"Error processing image: {str(e)}")
+
+@bot.command(name='remix')
+async def remix_command(ctx, image_id: int, *args):
+    """Remix an existing processed image."""
+    try:
+        # Get original image
+        image_data = repository.get_image(image_id)
+        if not image_data:
+            await ctx.send(f"Image with ID {image_id} not found")
+            return
+            
+        # Parse additional effects
+        command = command_parser.parse_command(' '.join(args))
+        
+        # Process image
+        processor = EffectProcessor(image_data['image'])
+        
+        # Apply original effects first
+        if 'parameters' in image_data:
+            for effect_name, params in image_data['parameters'].items():
+                processor.apply_effect(effect_name, params)
+                
+        # Apply new effects
+        for effect_name, params in command.effects:
+            processor.apply_effect(effect_name, params)
+            
+        # Handle output
+        output = processor.get_current_image()
+        output_bytes = BytesIO()
+        output.save(output_bytes, format='PNG')
+        output_bytes.seek(0)
+        
+        if command.tags:
+            new_id = repository.store_image(
+                image=output_bytes.getvalue(),
+                title=f"Remixed_{ctx.author.name}",
+                creator_id=str(ctx.author.id),
+                creator_name=ctx.author.name,
+                tags=command.tags + ['remixed'],
+                parameters=dict(command.effects),
+                source_image=f"remixed from ID: {image_id}"
+            )
+            await ctx.send(f"Remixed image stored with ID: {new_id}")
+            
+        output_bytes.seek(0)
+        await ctx.send(file=discord.File(output_bytes, filename="remixed.png"))
+        
+    except Exception as e:
+        await ctx.send(f"Error remixing image: {str(e)}")
 
 @bot.command(name='animate')
 async def animate_command(ctx, *args):
@@ -94,15 +219,11 @@ async def animate_command(ctx, *args):
         command = command_parser.parse_command(f"animate {' '.join(args)}")
         
         # Get input image
-        if ctx.message.attachments:
-            attachment = ctx.message.attachments[0]
-            image_bytes = await attachment.read()
-        else:
-            if not Path("input.png").exists():
-                await ctx.send("Please attach an image or ensure input.png exists!")
-                return
-            with open("input.png", "rb") as f:
-                image_bytes = f.read()
+        try:
+            image_bytes, source = await get_input_image(ctx, repository, command)
+        except ValueError as e:
+            await ctx.send(str(e))
+            return
 
         # Create animation
         processor = AnimationProcessor(image_bytes)
@@ -122,14 +243,16 @@ async def animate_command(ctx, *args):
             if video_path and video_path.exists():
                 await ctx.send(file=discord.File(str(video_path)))
                 if command.tags:
-                    video_id = repository.store_image(
-                        image=video_path.read_bytes(),
-                        title=f"Animation_{ctx.author.name}",
-                        creator_id=str(ctx.author.id),
-                        creator_name=ctx.author.name,
-                        tags=command.tags + ['animation'],
-                        parameters=dict(command.effects)
-                    )
+                    with open(video_path, 'rb') as f:
+                        video_id = repository.store_image(
+                            image=f.read(),
+                            title=f"Animation_{ctx.author.name}",
+                            creator_id=str(ctx.author.id),
+                            creator_name=ctx.author.name,
+                            tags=command.tags + ['animation'],
+                            parameters=dict(command.effects),
+                            source_image=source
+                        )
                     await ctx.send(f"Animation stored with ID: {video_id}")
             else:
                 await ctx.send("Failed to create animation")
@@ -150,41 +273,44 @@ async def ascii_command(ctx, *args):
         command = command_parser.parse_command(f"ascii {' '.join(args)}")
         
         # Get input image
-        if ctx.message.attachments:
-            attachment = ctx.message.attachments[0]
-            image_bytes = await attachment.read()
-        else:
-            if not Path("input.png").exists():
-                await ctx.send("Please attach an image or ensure input.png exists!")
-                return
-            with open("input.png", "rb") as f:
-                image_bytes = f.read()
+        try:
+            image_bytes, source = await get_input_image(ctx, repository, command)
+        except ValueError as e:
+            await ctx.send(str(e))
+            return
 
         # Generate ASCII art
-        processor = ASCIIProcessor(image_bytes)
+        processor = ASCIIProcessor()
+        image = Image.open(BytesIO(image_bytes))
         ascii_art = processor.convert_to_ascii(
+            image,
             cols=command.ascii_params.get('cols', 80),
             scale=command.ascii_params.get('scale', 0.43),
-            moreLevels=True
+            detailed=True
         )
         
         # Create and save both text and image versions
-        ascii_image = processor.create_ascii_image(ascii_art)
+        ascii_image = processor.create_frame_image(ascii_art)
+        output_bytes = BytesIO()
+        ascii_image.save(output_bytes, format='PNG')
+        output_bytes.seek(0)
         
         # Store results if tagged
         if command.tags:
             image_id = repository.store_image(
-                image=ascii_image,
+                image=output_bytes.getvalue(),
                 title=f"ASCII_{ctx.author.name}",
                 creator_id=str(ctx.author.id),
                 creator_name=ctx.author.name,
                 tags=command.tags + ['ascii'],
-                parameters=command.ascii_params
+                parameters=command.ascii_params,
+                source_image=source
             )
             await ctx.send(f"ASCII art stored with ID: {image_id}")
 
         # Send results
-        await ctx.send(file=discord.File(ascii_image, filename="ascii.png"))
+        output_bytes.seek(0)
+        await ctx.send(file=discord.File(output_bytes, filename="ascii.png"))
         await ctx.send(file=discord.File('\n'.join(ascii_art).encode(), filename="ascii.txt"))
 
     except Exception as e:
@@ -210,6 +336,7 @@ def main():
     # Create required directories
     Path("config").mkdir(exist_ok=True)
     Path("image_storage").mkdir(exist_ok=True)
+    Path("images").mkdir(exist_ok=True)  # For random image selection
 
     # Windows-specific event loop policy
     if sys.platform.startswith('win'):

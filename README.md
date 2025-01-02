@@ -1,139 +1,205 @@
-# Tetimi -- Tetsuo Discord Bot Commands
+# Image Processing Bot
 
-## Image Processing Commands
+A Discord bot for applying various visual effects and animations to images. The bot provides a powerful set of image processing capabilities including glitch effects, animations, and ASCII art conversion.
 
-### !image
-Process an image with various effects. Can be used with an attached image or will use the default input image.
+## Features
 
-**Basic Usage:**
-```
-!image [options]
-!image --random  # Process a random image from images folder
-```
+### Image Effects
+- Glitch distortion with customizable intensity
+- Chromatic aberration
+- Scan lines with adjustable spacing and opacity
+- Dynamic noise patterns
+- Energy distortion effects
+- Pulse effects with variable intensity
+- Consciousness visualization (combined effects)
 
-**Effect Parameters:**
-- `--rgb <r> <g> <b> --rgbalpha <0-255>` - Add RGB color overlay
-- `--color <r> <g> <b> --coloralpha <0-255>` - Add color tint
-- `--glitch <1-50>` - Apply glitch effect
-- `--chroma <1-40>` - Add chromatic aberration
-- `--scan <1-200>` - Add scan lines
-- `--noise <0-1>` - Add noise effect
-- `--energy <0-1>` - Add energy effect
-- `--pulse <0-1>` - Add pulse effect
+### Animation Support
+- Frame-by-frame animation generation
+- Video output with configurable settings
+- GIF creation with optimized settings
+- Multiple transition types
+- Pre-defined animation presets
+- Customizable frame rates and durations
 
-**Preset Effects:**
-```
-!image --preset <preset_name>
-```
-Available presets:
-- cyberpunk
-- vaporwave
-- glitch_art
-- retro
-- matrix
-- synthwave
-- akira
-- tetsuo
-- neo_tokyo
-- psychic
-- tetsuo_rage
+### ASCII Art
+- Image to ASCII conversion
+- Adjustable output size and scale
+- Multiple character sets (basic and detailed)
+- Support for both light and dark backgrounds
+- ASCII animation capabilities
 
-**Animation Options:**
-```
-!image --animate [options]
-```
-- `--frames <number>` - Number of frames (default: 30, max: 120)
-- `--fps <number>` - Frames per second (default: 24, max: 60)
-- `--style <style_name>` - Animation style
+### Configuration
+- Customizable effect parameters
+- Saveable effect presets
+- Adjustable animation settings
+- Configurable processing options
+- Command aliases and shortcuts
 
-Available animation styles:
-- glitch_surge
-- power_surge
-- psychic_blast
-- digital_decay
-- neo_flash
+## Installation
 
-**Special Effects:**
-- `--points` - Apply points effect
-  - `--dot-size <size>` - Set dot size for points effect
-  - `--reg-offset <offset>` - Set registration offset for points effect
-
-### !testanimate
-Test the animation system with a sequence of effect tests.
-```
-!testanimate
+1. Clone the repository:
+```bash
+git clone https://github.com/yourusername/image-processing-bot.git
+cd image-processing-bot
 ```
 
-## Art Repository Commands
+2. Create and activate a virtual environment:
+```bash
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+.\venv\Scripts\activate   # Windows
+```
 
-### !store
-Store artwork in the repository.
+3. Install required packages:
+```bash
+pip install -r requirements.txt
 ```
-!store <title> [tags...]
-```
-- Requires an attached image
-- Tags are optional; if not provided, words from title are used as tags
 
-### !process_store
-Process an image with effects and store the result.
+4. Set up configuration:
+```bash
+cp .env.example .env
 ```
-!process_store [effect_options]
+Edit `.env` and add your Discord bot token:
 ```
-- Requires an attached image
-- Supports all effect parameters from !image command
-- Automatically generates tags based on applied effects
+DISCORD_TOKEN=your_token_here
+```
 
-### !remix
-Apply effects to existing artwork from the repository.
-```
-!remix <artwork_id> [effect_options]
-```
-- Can optionally attach a new base image
-- Supports all effect parameters from !image command
+## Required Dependencies
 
-### !search
-Search for artwork in the repository.
-```
-!search <query>
-```
-- Searches through titles, tags, and creator information
-- Returns up to 50 results
+- Python 3.8+
+- PIL (Pillow) for image processing
+- discord.py for bot functionality
+- numpy for numerical operations
+- ffmpeg for video processing (must be installed separately)
 
-### !trending
-Show trending artwork from the last 24 hours.
-```
-!trending
-```
-- Displays most popular pieces based on interactions
-- Shows creator and interaction count
+## Project Structure
 
-### !history
-Show modification history of specific artwork.
 ```
-!history <artwork_id>
+image-processing-bot/
+├── config/
+│   ├── __init__.py
+│   ├── config.py
+│   └── effect_presets.py
+├── core/
+│   ├── __init__.py
+│   ├── animation_processor.py
+│   ├── ascii_processor.py
+│   ├── effect_processor.py
+│   ├── file_manager.py
+│   ├── image_processor.py
+│   └── utils.py
+├── effects/
+│   ├── __init__.py
+│   ├── advanced_effects.py
+│   ├── animation_effects.py
+│   └── basic_effects.py
+├── interface/
+│   ├── __init__.py
+│   └── command_parser.py
+├── storage/
+│   ├── __init__.py
+│   └── repository.py
+├── bot.py
+├── requirements.txt
+└── README.md
 ```
-- Displays version history
-- Shows modifiers and timestamps
 
-## Utility Commands
+## Usage
 
-### !help
-Display help information about available commands.
+1. Start the bot:
+```bash
+python bot.py
 ```
-!help
+
+2. Available Commands:
 ```
-- Shows basic command usage
-- Lists available effects and presets
+!process [options] - Process image with effects
+!animate [options] - Create animation
+!ascii [options] - Generate ASCII art
+!help - Show help information
+!examples - Show example commands
+```
 
-## Image Management
-- React with 🗑️ to delete bot-generated images
-- All processed images are automatically saved with timestamp in filename
+### Example Commands:
 
-## Technical Notes
-- Maximum file size limited by Discord (8MB for non-nitro servers)
-- Animation frames limited to 120 frames
-- FPS limited to 60
-- All color values must be between 0-255
-- Alpha values must be between 0-255
-- Effect intensities have specific ranges as noted in parameters
+```
+!process --glitch 0.5 --chroma 0.3 #cyberpunk
+!animate --preset psychic --frames 30 --fps 24
+!ascii --cols 120 --scale 0.5
+!process --random --preset cyberpunk
+!animate --glitch [0.3,0.8] --chroma [0.2,0.4]
+```
 
+## Effect Parameters
+
+Each effect has configurable parameters:
+
+- **Glitch**: `intensity` (0.0-1.0)
+- **Chromatic Aberration**: `offset` (0.0-1.0)
+- **Scan Lines**: `gap` (1-50), `opacity` (0.0-1.0)
+- **Noise**: `intensity` (0.0-1.0)
+- **Energy**: `intensity` (0.0-1.0)
+- **Pulse**: `intensity` (0.0-1.0)
+- **Consciousness**: `intensity` (0.0-1.0)
+
+## Animation Presets
+
+Built-in presets for quick effects:
+
+- **cyberpunk**: Glitch effects with scan lines
+- **psychic**: Energy and consciousness effects
+- **glitch_storm**: Intense glitch and noise combination
+
+## Development
+
+### Adding New Effects
+
+1. Define effect parameters in `effects/basic_effects.py`
+2. Implement effect logic in `effects/advanced_effects.py`
+3. Add animation support in `effects/animation_effects.py`
+4. Register effect in `core/effect_processor.py`
+
+### Creating Custom Presets
+
+Create presets in `config/presets.yml`:
+
+```yaml
+preset_name:
+  params:
+    effect_name:
+      param_name: value
+  frames: 30
+  fps: 24
+  description: "Preset description"
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature-name`
+3. Commit changes: `git commit -am 'Add feature'`
+4. Push to branch: `git push origin feature-name`
+5. Submit a Pull Request
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
+
+- PIL for image processing capabilities
+- discord.py for Discord integration
+- ffmpeg for video processing support
+- numpy for numerical operations
+
+## Support
+
+For support, please:
+1. Check the documentation
+2. Search existing issues
+3. Create a new issue with:
+   - Command used
+   - Expected behavior
+   - Actual behavior
+   - Error messages
+   - Sample images (if applicable)
